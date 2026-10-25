@@ -62,6 +62,12 @@ export function LoginForm() {
         return;
       }
 
+      if (profile.data().active === false) {
+        await signOut(getFirebaseAuth());
+        setError("Esta cuenta está desactivada.");
+        return;
+      }
+
       router.push("/panel");
     } catch (caught) {
       setError(loginErrorMessage(caught));
