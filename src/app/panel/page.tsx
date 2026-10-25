@@ -1,10 +1,5 @@
-import { PlaceholderScreen } from "@/components/placeholder-screen";
+import { PanelSession } from "@/components/panel-session";
 
 export default function PanelPage() {
-  return (
-    <PlaceholderScreen
-      title="Panel interno"
-      description="Aquí irán el resumen, la búsqueda de clientes, el riesgo, los cumpleaños y la gestión de recompensas. El acceso todavía no exige sesión."
-    />
-  );
+  return <PanelSession />;
 }

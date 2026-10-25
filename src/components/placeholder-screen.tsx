@@ -11,15 +11,9 @@ export function PlaceholderScreen({ title, description }: PlaceholderScreenProps
       <p className="text-sm font-medium text-zinc-500">Programa de lealtad</p>
       <h1 className="mt-2 text-3xl font-semibold tracking-tight">{title}</h1>
       <p className="mt-3 text-zinc-600">{description}</p>
-      <nav className="mt-8 flex gap-4 text-sm">
+      <nav className="mt-8 text-sm">
         <Link className="underline" href="/login">
-          Login
-        </Link>
-        <Link className="underline" href="/panel">
-          Panel
-        </Link>
-        <Link className="underline" href="/portal">
-          Portal
+          Iniciar sesión
         </Link>
       </nav>
     </main>
