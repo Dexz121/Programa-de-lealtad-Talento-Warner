@@ -1,8 +1,8 @@
 import "server-only";
 
 import type { QueryDocumentSnapshot } from "firebase-admin/firestore";
-import { birthdayOnCutoff } from "@/domain/cutoff";
 import { getAdminDb } from "@/lib/firebase-admin";
+import { birthdayList, riskSnapshotDocs } from "@/lib/panel-loyalty";
 
 function asRecord(value: unknown) {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -66,29 +66,26 @@ export async function fidelizacionCliente(id: string) {
 }
 
 export async function fidelizacionRiesgo() {
-  const snap = await getAdminDb().collection("loyaltySnapshots").get();
+  const docs = await riskSnapshotDocs();
 
-  return snap.docs
-    .filter((doc) => doc.data().enRiesgo === true)
+  return docs
     .map((doc) => ({
-      cliente_id: clienteId(doc.id, doc.data().customerId),
-      dias_sin_actividad: typeof doc.data().diasSinActividad === "number" ? doc.data().diasSinActividad : null,
+      cliente_id: clienteId(doc.id, doc.customerId),
+      dias_sin_actividad: doc.diasSinActividad,
     }))
     .sort((left, right) => Number(left.cliente_id) - Number(right.cliente_id));
 }
 
 export async function fidelizacionCumpleanos() {
-  const snap = await getAdminDb().collection("customers").get();
+  const rows = await birthdayList();
 
-  return snap.docs
-    .map((doc) => {
-      const data = asRecord(doc.data());
-      const dob = typeof data.dob === "string" ? data.dob : "";
-      return {
-        cliente_id: clienteId(doc.id, data.cliente_id),
-        fecha_cumpleanos: birthdayOnCutoff(dob),
-      };
-    })
-    .filter((row): row is { cliente_id: number | string; fecha_cumpleanos: string } => row.fecha_cumpleanos != null)
-    .sort((left, right) => left.fecha_cumpleanos.localeCompare(right.fecha_cumpleanos) || Number(left.cliente_id) - Number(right.cliente_id));
+  return rows
+    .map((row) => ({
+      cliente_id: clienteId(row.id, row.id),
+      fecha_cumpleanos: row.fechaCumpleanos,
+    }))
+    .sort(
+      (left, right) =>
+        left.fecha_cumpleanos.localeCompare(right.fecha_cumpleanos) || Number(left.cliente_id) - Number(right.cliente_id),
+    );
 }

@@ -21,8 +21,12 @@ import {
   asRecord,
   asText,
   ownerId,
-  sameId,
 } from "@/lib/panel-values";
+import { cachedRead } from "@/lib/read-cache";
+
+const FRESH_MS = 60_000;
+const BIRTHDAY_FROM_YEAR = 1920;
+const BIRTHDAY_TO_YEAR = 2026;
 
 type SnapshotFields = {
   customerId: string;
@@ -90,23 +94,103 @@ function applySnapshot(customer: CustomerListItem, snapshot: SnapshotFields | un
 }
 
 async function loadCustomers() {
-  const snap = await getAdminDb().collection("customers").get();
-  return snap.docs.map((doc) => customerFromDoc(doc.id, doc.data()));
+  return cachedRead("loyalty:customers", FRESH_MS, async () => {
+    const snap = await getAdminDb().collection("customers").get();
+    return snap.docs.map((doc) => customerFromDoc(doc.id, doc.data()));
+  });
 }
 
 async function loadSnapshots() {
-  const snap = await getAdminDb().collection("loyaltySnapshots").get();
-  const byCustomer = new Map<string, SnapshotFields>();
+  return cachedRead("loyalty:snapshots", FRESH_MS, async () => {
+    const snap = await getAdminDb().collection("loyaltySnapshots").get();
+    const byCustomer = new Map<string, SnapshotFields>();
 
-  for (const doc of snap.docs) {
-    const snapshot = snapshotFromDoc(doc.id, doc.data());
-    byCustomer.set(doc.id, snapshot);
-    if (snapshot.customerId) {
-      byCustomer.set(snapshot.customerId, snapshot);
+    for (const doc of snap.docs) {
+      const snapshot = snapshotFromDoc(doc.id, doc.data());
+      byCustomer.set(doc.id, snapshot);
+      if (snapshot.customerId) {
+        byCustomer.set(snapshot.customerId, snapshot);
+      }
+    }
+
+    return byCustomer;
+  });
+}
+
+type CustomerDoc = { id: string; data: () => unknown };
+
+async function hydrate(docs: CustomerDoc[], canSeeAmounts: boolean) {
+  if (docs.length === 0) {
+    return [];
+  }
+
+  const db = getAdminDb();
+  const snaps = await db.getAll(...docs.map((doc) => db.collection("loyaltySnapshots").doc(doc.id)));
+  const snapshots = new Map<string, SnapshotFields>();
+  for (const snap of snaps) {
+    if (snap.exists) {
+      snapshots.set(snap.id, snapshotFromDoc(snap.id, snap.data()));
     }
   }
 
-  return byCustomer;
+  return docs.map((doc) => applySnapshot(customerFromDoc(doc.id, doc.data()), snapshots.get(doc.id), canSeeAmounts));
+}
+
+function nameVariants(needle: string) {
+  const trimmed = needle.trim();
+  const variants = new Set<string>([trimmed, trimmed.toLowerCase()]);
+  if (trimmed) {
+    variants.add(trimmed.charAt(0).toUpperCase() + trimmed.slice(1).toLowerCase());
+  }
+  return [...variants];
+}
+
+async function prefixCustomers(field: "name" | "email", prefix: string) {
+  const snap = await getAdminDb()
+    .collection("customers")
+    .where(field, ">=", prefix)
+    .where(field, "<=", `${prefix}\uf8ff`)
+    .limit(30)
+    .get();
+  return snap.docs;
+}
+
+async function locateCustomer(customerId: string) {
+  const db = getAdminDb();
+  const direct = await db.collection("customers").doc(customerId).get();
+  if (direct.exists) {
+    return direct;
+  }
+
+  const lookups = [db.collection("customers").where("cliente_id", "==", customerId).limit(1).get()];
+  if (/^\d+$/.test(customerId)) {
+    lookups.push(db.collection("customers").where("cliente_id", "==", Number(customerId)).limit(1).get());
+  }
+
+  const snaps = await Promise.all(lookups);
+  for (const snap of snaps) {
+    const match = snap.docs[0];
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
+async function relatedDocs(collection: string, ids: string[]) {
+  const db = getAdminDb();
+  const unique = [...new Set(ids.filter(Boolean))];
+  const snaps = await Promise.all(unique.map((id) => db.collection(collection).where("customerId", "==", id).get()));
+  const docs = new Map<string, Record<string, unknown>>();
+
+  for (const snap of snaps) {
+    for (const doc of snap.docs) {
+      docs.set(doc.id, asRecord(doc.data()));
+    }
+  }
+
+  return [...docs.entries()];
 }
 
 function snapshotFor(customerId: string, snapshots: Map<string, SnapshotFields>) {
@@ -124,108 +208,131 @@ function withLoyalty(
 export async function buildSummary(permissions: PermissionId[]) {
   const canSeeAmounts = permissions.includes("ver_montos");
   const canSeeRisk = permissions.includes("ver_riesgo_cumpleanos");
-  const [customers, snapshots] = await Promise.all([loadCustomers(), loadSnapshots()]);
-  const rows = withLoyalty(customers, snapshots, canSeeAmounts);
-  const niveles = { Bronce: 0, Plata: 0, Oro: 0, "Sin calcular": 0 };
 
-  for (const row of rows) {
-    if (row.nivel) {
-      niveles[row.nivel] += 1;
-    } else {
-      niveles["Sin calcular"] += 1;
-    }
-  }
+  return cachedRead(`loyalty:summary:${canSeeAmounts}:${canSeeRisk}`, 30_000, async () => {
+    const db = getAdminDb();
+    const snapshots = db.collection("loyaltySnapshots");
+    const [totalSnap, bronceSnap, plataSnap, oroSnap, riesgoSnap, topSnap, birthdays] = await Promise.all([
+      db.collection("customers").count().get(),
+      snapshots.where("nivel", "==", "Bronce").count().get(),
+      snapshots.where("nivel", "==", "Plata").count().get(),
+      snapshots.where("nivel", "==", "Oro").count().get(),
+      canSeeRisk ? snapshots.where("enRiesgo", "==", true).count().get() : Promise.resolve(null),
+      snapshots.orderBy("puntos", "desc").limit(10).get(),
+      canSeeRisk ? birthdayList() : Promise.resolve(null),
+    ]);
 
-  const top = rows
-    .filter((row) => row.puntos != null)
-    .sort((left, right) => (right.puntos ?? 0) - (left.puntos ?? 0) || left.nombre.localeCompare(right.nombre, "es"))
-    .slice(0, 10)
-    .map((row) => ({
-      id: row.id,
-      nombre: row.nombre,
-      nivel: row.nivel,
-      puntos: row.puntos,
-      ...(canSeeAmounts ? { gasto12m: row.gasto12m ?? null } : {}),
-    }));
+    const bronce = bronceSnap.data().count;
+    const plata = plataSnap.data().count;
+    const oro = oroSnap.data().count;
+    const totalClientes = totalSnap.data().count;
+    const topDocs = topSnap.docs;
+    const customerSnaps = topDocs.length
+      ? await db.getAll(...topDocs.map((doc) => db.collection("customers").doc(doc.id)))
+      : [];
+    const customers = new Map(customerSnaps.filter((doc) => doc.exists).map((doc) => [doc.id, customerFromDoc(doc.id, doc.data())]));
+    const top = topDocs
+      .map((doc) => {
+        const snapshot = snapshotFromDoc(doc.id, doc.data());
+        const customer = customers.get(doc.id);
+        return {
+          id: customer?.id || snapshot.customerId || doc.id,
+          nombre: customer?.nombre || "Sin nombre",
+          nivel: snapshot.nivel,
+          puntos: snapshot.puntos,
+          ...(canSeeAmounts ? { gasto12m: snapshot.gasto12m } : {}),
+        };
+      })
+      .sort((left, right) => (right.puntos ?? 0) - (left.puntos ?? 0) || left.nombre.localeCompare(right.nombre, "es"));
 
-  return {
-    totalClientes: rows.length,
-    niveles,
-    top,
-    enRiesgo: canSeeRisk ? rows.filter((row) => row.enRiesgo).length : null,
-    cumpleanos: canSeeRisk ? rows.filter((row) => birthdayOnCutoff(row.dob)).length : null,
-  };
+    return {
+      totalClientes,
+      niveles: {
+        Bronce: bronce,
+        Plata: plata,
+        Oro: oro,
+        "Sin calcular": Math.max(0, totalClientes - bronce - plata - oro),
+      },
+      top,
+      enRiesgo: riesgoSnap ? riesgoSnap.data().count : null,
+      cumpleanos: birthdays ? birthdays.length : null,
+    };
+  });
 }
 
 export async function searchCustomers(query: string, permissions: PermissionId[]) {
   const canSeeAmounts = permissions.includes("ver_montos");
-  const [customers, snapshots] = await Promise.all([loadCustomers(), loadSnapshots()]);
   const needle = query.trim().toLowerCase();
-  const rows = withLoyalty(customers, snapshots, canSeeAmounts)
-    .filter((customer) => {
-      if (!needle) {
-        return true;
-      }
 
-      return (
-        customer.nombre.toLowerCase().includes(needle) ||
-        customer.email.toLowerCase().includes(needle) ||
-        customer.id.toLowerCase().includes(needle)
+  return cachedRead(`loyalty:search:${canSeeAmounts}:${needle}`, 20_000, async () => {
+    const db = getAdminDb();
+
+    if (!needle) {
+      const [totalSnap, page] = await Promise.all([
+        db.collection("customers").count().get(),
+        db.collection("customers").orderBy("name").limit(30).get(),
+      ]);
+      return {
+        total: totalSnap.data().count,
+        clientes: await hydrate(page.docs, canSeeAmounts),
+      };
+    }
+
+    const found = new Map<string, CustomerDoc>();
+    const tasks: Array<Promise<CustomerDoc[]>> = [];
+
+    if (/^\d+$/.test(needle)) {
+      tasks.push(
+        locateCustomer(needle).then((doc) => (doc ? [doc] : [])),
       );
-    })
-    .sort((left, right) => left.nombre.localeCompare(right.nombre, "es"));
-
-  return {
-    total: rows.length,
-    clientes: rows.slice(0, 30),
-  };
-}
-
-async function docsForCustomer(collection: string, customerIds: string[]) {
-  const db = getAdminDb();
-  const fields = ["customerId", "clienteId", "cliente_id"] as const;
-  const values: Array<string | number> = [];
-
-  for (const customerId of new Set(customerIds.filter(Boolean))) {
-    values.push(customerId);
-    if (/^\d+$/.test(customerId)) {
-      values.push(Number(customerId));
     }
-  }
 
-  const snaps = await Promise.all(
-    fields.flatMap((field) => values.map((value) => db.collection(collection).where(field, "==", value).get())),
-  );
-  const docs = new Map<string, Record<string, unknown>>();
-
-  for (const snap of snaps) {
-    for (const doc of snap.docs) {
-      docs.set(doc.id, asRecord(doc.data()));
+    const field = needle.includes("@") ? "email" : "name";
+    for (const prefix of nameVariants(needle)) {
+      tasks.push(prefixCustomers(field, prefix));
     }
-  }
 
-  return [...docs.entries()];
+    const groups = await Promise.all(tasks);
+    for (const group of groups) {
+      for (const doc of group) {
+        found.set(doc.id, doc);
+      }
+    }
+
+    const clientes = (await hydrate([...found.values()], canSeeAmounts))
+      .filter(
+        (customer) =>
+          customer.nombre.toLowerCase().includes(needle) ||
+          customer.email.toLowerCase().includes(needle) ||
+          customer.id.toLowerCase().includes(needle),
+      )
+      .sort((left, right) => left.nombre.localeCompare(right.nombre, "es"))
+      .slice(0, 30);
+
+    return { total: clientes.length, clientes };
+  });
 }
 
 export async function customerDetail(customerId: string, permissions: PermissionId[]) {
   const canSeeAmounts = permissions.includes("ver_montos");
-  const db = getAdminDb();
-  const direct = await db.collection("customers").doc(customerId).get();
-  let customer = direct.exists ? customerFromDoc(direct.id, direct.data()) : null;
 
-  if (!customer) {
-    const customers = await loadCustomers();
-    customer = customers.find((item) => sameId(item.id, customerId)) ?? null;
-  }
+  return cachedRead(`loyalty:detail:${canSeeAmounts}:${customerId}`, 15_000, async () => {
+    const located = await locateCustomer(customerId);
+    if (!located) {
+      throw new PanelActionError("Ese cliente no existe.", 404);
+    }
 
-  if (!customer) {
-    throw new PanelActionError("Ese cliente no existe.", 404);
-  }
+    const customer = customerFromDoc(located.id, located.data());
+    const db = getAdminDb();
+    let snapshotSnap = await db.collection("loyaltySnapshots").doc(located.id).get();
+    if (!snapshotSnap.exists && customer.id !== located.id) {
+      snapshotSnap = await db.collection("loyaltySnapshots").doc(customer.id).get();
+    }
 
-  const lookupIds = [customer.id, direct.id].filter(Boolean);
-  const snapshots = await loadSnapshots();
-  const row = applySnapshot(customer, snapshotFor(customer.id, snapshots), canSeeAmounts);
-  const movementDocs = await docsForCustomer("pointMovements", lookupIds);
+    const snapshot = snapshotSnap.exists ? snapshotFromDoc(snapshotSnap.id, snapshotSnap.data()) : undefined;
+    const row = applySnapshot(customer, snapshot, canSeeAmounts);
+    const lookupIds = [located.id, customer.id];
+    const movementDocs = await relatedDocs("pointMovements", lookupIds);
   const movimientos: MovementItem[] = movementDocs
     .map(([, data]) => ({
       fecha: asMexicoDate(data.fecha) || asDob(data.fecha),
@@ -238,65 +345,127 @@ export async function customerDetail(customerId: string, permissions: Permission
   let pedidos: OrderItem[] | null = null;
   let pagos: PaymentItem[] | null = null;
 
-  if (canSeeAmounts) {
-    const orderDocs = await docsForCustomer("orders", lookupIds);
-    pedidos = orderDocs
-      .map(([id, data]) => ({
-        id,
-        fecha: asMexicoDate(data.createdAt ?? data.created_at ?? data.fecha),
-        estado: asText(data.status ?? data.estado),
-        pago: asText(data.paymentStatus ?? data.payment_status ?? data.pago),
-        total: asNumber(data.total),
-        moneda: asText(data.currency ?? data.moneda),
-      }))
-      .sort((left, right) => right.fecha.localeCompare(left.fecha));
+    if (canSeeAmounts) {
+      const orderDocs = await relatedDocs("orders", lookupIds);
+      pedidos = orderDocs
+        .map(([id, data]) => ({
+          id,
+          fecha: asMexicoDate(data.createdAt ?? data.created_at ?? data.fecha),
+          estado: asText(data.status ?? data.estado),
+          pago: asText(data.paymentStatus ?? data.payment_status ?? data.pago),
+          total: asNumber(data.total),
+          moneda: asText(data.currency ?? data.moneda),
+        }))
+        .sort((left, right) => right.fecha.localeCompare(left.fecha));
 
-    const paymentDocs = await docsForCustomer("payments", lookupIds);
-    pagos = paymentDocs
-      .map(([id, data]) => ({
-        id,
-        fecha: asMexicoDate(data.paidAt ?? data.paid_at ?? data.createdAt ?? data.created_at ?? data.fecha),
-        estado: asText(data.status ?? data.estado),
-        monto: asNumber(data.amount ?? data.monto),
-        moneda: asText(data.currency ?? data.moneda),
-      }))
-      .sort((left, right) => right.fecha.localeCompare(left.fecha));
-  }
+      const paymentDocs = await relatedDocs("payments", lookupIds);
+      pagos = paymentDocs
+        .map(([id, data]) => ({
+          id,
+          fecha: asMexicoDate(data.paidAt ?? data.paid_at ?? data.createdAt ?? data.created_at ?? data.fecha),
+          estado: asText(data.status ?? data.estado),
+          monto: asNumber(data.amount ?? data.monto),
+          moneda: asText(data.currency ?? data.moneda),
+        }))
+        .sort((left, right) => right.fecha.localeCompare(left.fecha));
+    }
 
-  return {
-    cliente: row,
-    movimientos,
-    pedidos,
-    pagos,
-  };
+    return {
+      cliente: row,
+      movimientos,
+      pedidos,
+      pagos,
+    };
+  });
+}
+
+export async function riskSnapshotDocs() {
+  return cachedRead("loyalty:risk-docs", FRESH_MS, async () => {
+    const snap = await getAdminDb().collection("loyaltySnapshots").where("enRiesgo", "==", true).get();
+    return snap.docs.map((doc) => {
+      const data = doc.data();
+      const dias = data.diasSinActividad;
+      return {
+        id: doc.id,
+        customerId: data.customerId,
+        diasSinActividad: typeof dias === "number" ? dias : null,
+      };
+    });
+  });
 }
 
 export async function riskList() {
-  const [customers, snapshots] = await Promise.all([loadCustomers(), loadSnapshots()]);
-  return withLoyalty(customers, snapshots, false)
-    .filter((customer) => customer.enRiesgo)
-    .map((customer) => ({
-      id: customer.id,
-      nombre: customer.nombre,
-      email: customer.email,
-      diasSinActividad: customer.diasSinActividad,
-    }))
-    .sort((left, right) => (right.diasSinActividad ?? 0) - (left.diasSinActividad ?? 0));
+  return cachedRead("loyalty:risk-list", FRESH_MS, async () => {
+    const docs = await riskSnapshotDocs();
+    const db = getAdminDb();
+    const customers = new Map<string, CustomerListItem>();
+
+    for (let index = 0; index < docs.length; index += 50) {
+      const chunk = docs.slice(index, index + 50);
+      const snaps = await db.getAll(...chunk.map((doc) => db.collection("customers").doc(doc.id)));
+      for (const snap of snaps) {
+        if (snap.exists) {
+          customers.set(snap.id, customerFromDoc(snap.id, snap.data()));
+        }
+      }
+    }
+
+    return docs
+      .flatMap((doc) => {
+        const customer = customers.get(doc.id);
+        if (!customer) {
+          return [];
+        }
+
+        return [
+          {
+            id: customer.id,
+            nombre: customer.nombre,
+            email: customer.email,
+            diasSinActividad: doc.diasSinActividad,
+          },
+        ];
+      })
+      .sort((left, right) => (right.diasSinActividad ?? 0) - (left.diasSinActividad ?? 0) || left.nombre.localeCompare(right.nombre, "es"));
+  });
 }
 
 export async function birthdayList() {
-  const customers = await loadCustomers();
-  return customers
-    .map((customer) => ({
-      id: customer.id,
-      nombre: customer.nombre,
-      email: customer.email,
-      fechaCumpleanos: birthdayOnCutoff(customer.dob),
-    }))
-    .filter((customer): customer is { id: string; nombre: string; email: string; fechaCumpleanos: string } =>
-      customer.fechaCumpleanos != null,
-    )
-    .sort((left, right) => left.fechaCumpleanos.localeCompare(right.fechaCumpleanos) || left.nombre.localeCompare(right.nombre, "es"));
+  return cachedRead("loyalty:birthdays", FRESH_MS, async () => {
+    const years = Array.from({ length: BIRTHDAY_TO_YEAR - BIRTHDAY_FROM_YEAR + 1 }, (_, index) => BIRTHDAY_FROM_YEAR + index);
+    const docs: CustomerDoc[] = [];
+
+    for (let index = 0; index < years.length; index += 8) {
+      const chunk = years.slice(index, index + 8);
+      const snaps = await Promise.all(
+        chunk.map((year) =>
+          getAdminDb()
+            .collection("customers")
+            .where("dob", ">=", `${year}-04-30`)
+            .where("dob", "<=", `${year}-05-07\uf8ff`)
+            .get(),
+        ),
+      );
+      for (const snap of snaps) {
+        docs.push(...snap.docs);
+      }
+    }
+
+    return docs
+      .map((doc) => {
+        const customer = customerFromDoc(doc.id, doc.data());
+        return {
+          id: customer.id,
+          nombre: customer.nombre,
+          email: customer.email,
+          fechaCumpleanos: birthdayOnCutoff(customer.dob),
+        };
+      })
+      .filter((customer): customer is { id: string; nombre: string; email: string; fechaCumpleanos: string } =>
+        customer.fechaCumpleanos != null,
+      )
+      .sort((left, right) => left.fechaCumpleanos.localeCompare(right.fechaCumpleanos) || left.nombre.localeCompare(right.nombre, "es"));
+  });
 }
 
 export async function customersCsv(permissions: PermissionId[]) {

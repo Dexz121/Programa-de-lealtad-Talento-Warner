@@ -10,6 +10,7 @@ import { INITIAL_ROLES, type PermissionId } from "@/domain/permissions";
 import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
 import { PanelActionError, isPermissionId, sanitizePermissions } from "@/lib/panel-auth";
 import { asInteger, asMexicoDate, asNumber, asRecord, asText } from "@/lib/panel-values";
+import { invalidateReads } from "@/lib/read-cache";
 
 const INITIAL_ROLE_IDS = new Set<string>(INITIAL_ROLES.map((role) => role.id));
 
@@ -244,19 +245,35 @@ export async function uploadRewardPhoto(id: string, file: File) {
 
 export async function listRedemptions() {
   const db = getAdminDb();
-  const [redemptions, customers, rewards] = await Promise.all([
+  const [redemptions, rewards] = await Promise.all([
     db.collection("redemptions").get(),
-    db.collection("customers").get(),
     db.collection("rewards").get(),
   ]);
+  const customerIds = [
+    ...new Set(
+      redemptions.docs
+        .map((doc) => {
+          const data = asRecord(doc.data());
+          return asText(data.customerId) || asText(data.clienteId) || asText(data.cliente_id);
+        })
+        .filter(Boolean),
+    ),
+  ];
   const names = new Map<string, string>();
-  for (const doc of customers.docs) {
-    const data = asRecord(doc.data());
-    const nombre = asText(data.name) || asText(data.nombre) || doc.id;
-    names.set(doc.id, nombre);
-    const sourceId = asText(data.cliente_id) || asText(data.id);
-    if (sourceId) {
-      names.set(sourceId, nombre);
+  for (let index = 0; index < customerIds.length; index += 50) {
+    const chunk = customerIds.slice(index, index + 50);
+    const customers = await db.getAll(...chunk.map((id) => db.collection("customers").doc(id)));
+    for (const doc of customers) {
+      if (!doc.exists) {
+        continue;
+      }
+      const data = asRecord(doc.data());
+      const nombre = asText(data.name) || asText(data.nombre) || doc.id;
+      names.set(doc.id, nombre);
+      const sourceId = asText(data.cliente_id) || asText(data.id);
+      if (sourceId) {
+        names.set(sourceId, nombre);
+      }
     }
   }
 
@@ -366,6 +383,8 @@ export async function applyRedemptionAction(id: string, accion: unknown) {
       transaction.update(couponRef, { estado: "cancelado" });
     }
   });
+
+  invalidateReads("loyalty:");
 }
 
 function temporaryPassword() {
@@ -379,15 +398,15 @@ export async function grantPortalAccess(customerId: string) {
   let snap = await ref.get();
 
   if (!snap.exists) {
-    const all = await db.collection("customers").get();
-    const match = all.docs.find((doc) => {
-      const data = asRecord(doc.data());
-      return asText(data.cliente_id) === customerId || asText(data.id) === customerId;
-    });
-    if (!match) {
+    const lookups = [db.collection("customers").where("cliente_id", "==", customerId).limit(1).get()];
+    if (/^\d+$/.test(customerId)) {
+      lookups.push(db.collection("customers").where("cliente_id", "==", Number(customerId)).limit(1).get());
+    }
+    const found = (await Promise.all(lookups)).flatMap((item) => item.docs)[0];
+    if (!found) {
       throw new PanelActionError("Ese cliente no existe.", 404);
     }
-    snap = match;
+    snap = found;
   }
 
   const data = asRecord(snap.data());
@@ -397,9 +416,8 @@ export async function grantPortalAccess(customerId: string) {
   }
 
   const nombre = asText(data.name) || asText(data.nombre);
-  const staffSnap = await db.collection("staffUsers").get();
-  const taken = staffSnap.docs.some((doc) => asText(doc.data().email).toLowerCase() === email);
-  if (taken) {
+  const staffSnap = await db.collection("staffUsers").where("email", "==", email).limit(1).get();
+  if (!staffSnap.empty) {
     throw new PanelActionError("Ese correo pertenece al equipo interno.", 409);
   }
 
@@ -437,6 +455,7 @@ export async function grantPortalAccess(customerId: string) {
     },
     { merge: true },
   );
+  invalidateReads("loyalty:");
 
   return { password, portal: "temporal" as const };
 }
@@ -571,6 +590,7 @@ export async function createStaffUser(input: unknown) {
       roleName: role.name,
       active: draft.active,
     });
+    invalidateReads("staff:");
   } catch (error) {
     await auth.deleteUser(uid).catch(() => undefined);
     throw error;
@@ -634,6 +654,7 @@ export async function updateStaffUser(actorUid: string, id: string, input: unkno
     },
     { merge: true },
   );
+  invalidateReads("staff:");
 
   return nextStaff.find((person) => person.uid === id) ?? current;
 }
@@ -703,6 +724,7 @@ export async function updateRole(id: string, input: unknown) {
   if (updates > 0) {
     await batch.commit();
   }
+  invalidateReads("staff:");
   return { id, ...draft };
 }
 

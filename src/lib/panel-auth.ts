@@ -5,6 +5,9 @@ import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
 import { INITIAL_ROLES, PERMISSIONS, type PermissionId } from "@/domain/permissions";
 import type { PanelSession } from "@/domain/panel";
 import { asRecord, asText } from "@/lib/panel-values";
+import { cachedRead } from "@/lib/read-cache";
+
+const STAFF_TTL_MS = 45_000;
 
 const PERMISSION_IDS = new Set<string>(PERMISSIONS.map((permission) => permission.id));
 
@@ -117,14 +120,37 @@ export async function requireStaff(request: Request, permission?: PermissionId) 
     return { response: Response.json({ error: "No autorizado" }, { status: 401 }) };
   }
 
+  const loaded = await cachedRead(
+    `staff:${uid}`,
+    STAFF_TTL_MS,
+    () => loadStaffMember(uid, tokenEmail),
+    (value) => value.kind === "ok",
+  );
+
+  if (loaded.kind === "missing") {
+    return { response: Response.json({ error: "Esta cuenta no es del equipo interno." }, { status: 403 }) };
+  }
+
+  if (loaded.kind === "inactive") {
+    return { response: Response.json({ error: "Esta cuenta está desactivada." }, { status: 403 }) };
+  }
+
+  if (permission && !loaded.staff.permissions.includes(permission)) {
+    return { response: Response.json({ error: "No tienes permiso para esta acción." }, { status: 403 }) };
+  }
+
+  return { staff: loaded.staff };
+}
+
+async function loadStaffMember(uid: string, tokenEmail: string) {
   const staffSnap = await getAdminDb().collection("staffUsers").doc(uid).get();
   if (!staffSnap.exists) {
-    return { response: Response.json({ error: "Esta cuenta no es del equipo interno." }, { status: 403 }) };
+    return { kind: "missing" as const };
   }
 
   const data = asRecord(staffSnap.data());
   if (data.active === false) {
-    return { response: Response.json({ error: "Esta cuenta está desactivada." }, { status: 403 }) };
+    return { kind: "inactive" as const };
   }
 
   const roleName = asText(data.roleName);
@@ -133,10 +159,6 @@ export async function requireStaff(request: Request, permission?: PermissionId) 
 
   if (!roleId && role.roleId !== "sin-rol") {
     await staffSnap.ref.set({ roleId: role.roleId, roleName: role.roleName }, { merge: true });
-  }
-
-  if (permission && !role.permissions.includes(permission)) {
-    return { response: Response.json({ error: "No tienes permiso para esta acción." }, { status: 403 }) };
   }
 
   const staff: PanelSession & { uid: string } = {
@@ -148,5 +170,5 @@ export async function requireStaff(request: Request, permission?: PermissionId) 
     permissions: role.permissions,
   };
 
-  return { staff };
+  return { kind: "ok" as const, staff };
 }

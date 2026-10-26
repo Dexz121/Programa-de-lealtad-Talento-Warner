@@ -4,6 +4,7 @@ import { connection } from "next/server";
 import { Timestamp } from "firebase-admin/firestore";
 import { localDateFromApi, scoreCustomer, type RuleOrder, type RulePayment } from "@/domain/loyalty-rules";
 import { getAdminDb } from "@/lib/firebase-admin";
+import { invalidateReads } from "@/lib/read-cache";
 
 const SOURCE = "https://fakeapi.dev/api/v1";
 const LOCK_MS = 8 * 60 * 1000;
@@ -396,6 +397,7 @@ export async function runSync(origin: { origen: "manual" | "cron"; actor?: strin
     });
 
     await writer.close();
+    invalidateReads("loyalty:");
 
     return {
       ok: true,

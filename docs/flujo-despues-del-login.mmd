@@ -1,0 +1,118 @@
+%% Flujo de uso del panel interno después del login.
+%% El menú solo muestra la sección si el rol incluye el permiso indicado.
+
+flowchart TD
+  loginOk(["Login correcto: cuenta de equipo activa"]) --> panel["Entra a /panel"]
+  panel --> auth{"¿Firebase tiene usuario?"}
+  auth -->|No| vuelve["Vuelve a /login"]
+  auth -->|Sí| carga["Pide la sesión del equipo"]
+  carga --> cuenta{"¿Sesión válida?"}
+  cuenta -->|No autorizada o con error| sale["Cierra la sesión de Firebase"]
+  sale --> vuelve
+  cuenta -->|Sí| shell["Muestra nombre, correo y rol"]
+  shell --> nav["Arma el menú con las secciones del rol"]
+  shell --> logout["Cerrar sesión"]
+  logout --> vuelve
+  nav --> alguna{"¿Hay alguna sección visible?"}
+  alguna -->|No| sinPermisos["Aviso: esta cuenta no tiene permisos para ver el panel"]
+  alguna -->|Sí| abre["Abre la sección de la URL o la primera del menú"]
+  abre --> elegir{"Elige una sección"}
+
+  elegir -->|"Resumen · ver_resumen"| resumen
+  elegir -->|"Clientes · buscar_cliente"| clientes
+  elegir -->|"Riesgo · ver_riesgo_cumpleanos"| riesgo
+  elegir -->|"Cumpleaños · ver_riesgo_cumpleanos"| cumple
+  elegir -->|"Catálogo · gestionar_catalogo"| catalogo
+  elegir -->|"Canjes · gestionar_canjes"| canjes
+  elegir -->|"Equipo · gestionar_usuarios"| equipo
+  elegir -->|"Roles · gestionar_roles"| roles
+  elegir -->|"Tokens · gestionar_tokens"| tokens
+  elegir -->|"Sincronización · ejecutar_sincronizacion"| sync
+
+  subgraph resumenBox ["Resumen"]
+    resumen["Ve clientes, niveles, en riesgo, cumpleaños y el top de puntos"]
+    resumen --> expResumen{"¿Puede exportar reportes?"}
+    expResumen -->|Sí| csvResumen["Exporta el CSV de clientes"]
+    expResumen -->|No| soloResumen["Solo consulta el resumen"]
+  end
+
+  subgraph clientesBox ["Clientes"]
+    clientes["Ve la lista de clientes"]
+    clientes --> buscar["Busca por nombre, correo o identificador"]
+    clientes --> expClientes{"¿Puede exportar reportes?"}
+    expClientes -->|Sí| csvClientes["Exporta el CSV de clientes"]
+    buscar --> ficha["Abre un cliente: nivel, puntos, disponibles, riesgo e historial"]
+    ficha --> montos{"¿Puede ver montos?"}
+    montos -->|Sí| dinero["Ve gasto de 12 meses, pedidos y pagos"]
+    montos -->|No| sinMontos["Esos datos no aparecen"]
+    ficha --> acceso{"¿Puede generar acceso al portal?"}
+    acceso -->|Sí| clave["Genera o restablece la contraseña temporal"]
+    clave --> unaVez["La contraseña se muestra una sola vez"]
+    acceso -->|No| sinAcceso["No puede dar acceso al portal"]
+  end
+
+  subgraph riesgoBox ["Riesgo"]
+    riesgo["Lista quien ya compró y lleva 90 días o más sin actividad"]
+    riesgo --> expRiesgo{"¿Puede exportar reportes?"}
+    expRiesgo -->|Sí| csvRiesgo["Exporta el CSV de riesgo"]
+    expRiesgo -->|No| soloRiesgo["Solo consulta la lista"]
+  end
+
+  subgraph cumpleBox ["Cumpleaños"]
+    cumple["Lista cumpleaños del 30 de abril al 7 de mayo de 2026"]
+    cumple --> expCumple{"¿Puede exportar reportes?"}
+    expCumple -->|Sí| csvCumple["Exporta el CSV de cumpleaños"]
+    expCumple -->|No| soloCumple["Solo consulta la lista"]
+  end
+
+  subgraph catalogoBox ["Catálogo"]
+    catalogo["Ve productos y descuentos"]
+    catalogo --> altaCat["Crea una recompensa o edita una existente"]
+    altaCat --> tipoCat{"Tipo"}
+    tipoCat -->|Producto| producto["Nombre, puntos, stock, nivel mínimo, límite y si está activa"]
+    tipoCat -->|Descuento| descuento["Lo mismo, más tipo de descuento, valor, compra mínima y vigencia"]
+    producto --> guardaCat["Guarda la recompensa"]
+    descuento --> guardaCat
+    catalogo --> foto["Sube una foto jpeg, png o webp"]
+  end
+
+  subgraph canjesBox ["Canjes"]
+    canjes["Ve los canjes y filtra por estado"]
+    canjes --> accion{"Qué se puede hacer con ese canje"}
+    accion -->|Producto pendiente| entregar["Marcar entregado"]
+    accion -->|Descuento vigente| aplicar["Aplicar cupón"]
+    accion -->|Pendiente, entregado o vigente| cancelar["Cancelar y devolver los puntos"]
+  end
+
+  subgraph equipoBox ["Equipo"]
+    equipo["Ve las cuentas internas"]
+    equipo --> crearCuenta["Crea una cuenta: nombre, correo, contraseña y rol"]
+    equipo --> cambiarRol["Cambia el rol de una cuenta"]
+    equipo --> activar["Activa o desactiva una cuenta"]
+    activar --> propia{"¿Es su propia cuenta activa?"}
+    propia -->|Sí| noPropia["No puede desactivarse a sí misma"]
+    propia -->|No| aplicaEstado["Aplica el cambio, salvo que sea el último administrador"]
+  end
+
+  subgraph rolesBox ["Roles"]
+    roles["Ve los roles y sus permisos"]
+    roles --> crearRol["Crea un rol con nombre y permisos de la lista fija"]
+    roles --> editarRol["Marca o quita permisos de un rol"]
+    roles --> borrarRol{"¿Es un rol inicial?"}
+    borrarRol -->|Administrador, Gerente o Atención| noBorrar["No se puede eliminar"]
+    borrarRol -->|Rol creado después| eliminarRol["Elimina el rol"]
+  end
+
+  subgraph tokensBox ["Tokens"]
+    tokens["Ve los tokens de evaluación"]
+    tokens --> generar["Genera un token con un nombre"]
+    generar --> secreto["El secreto se muestra una sola vez; solo se guarda el hash"]
+    tokens --> revocar["Revoca un token activo"]
+  end
+
+  subgraph syncBox ["Sincronización"]
+    sync["Ve las corridas: inicio, fin, requests y resultado"]
+    sync --> correr["Sincronizar ahora"]
+    correr --> recalcula["Descarga la tienda y recalcula puntos al 30 de abril de 2026"]
+    recalcula --> historial["Muestra el mensaje y actualiza el historial"]
+  end
