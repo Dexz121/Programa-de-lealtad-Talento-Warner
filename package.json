@@ -17,6 +17,9 @@
     "react-dom": "19.3.0",
     "server-only": "^0.0.1"
   },
+  "overrides": {
+    "jwks-rsa": "3.2.2"
+  },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "@tailwindcss/turbopack": "^4",
