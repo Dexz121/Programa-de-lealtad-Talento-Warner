@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { SyncRunItem } from "@/domain/panel";
 import { usePanelContext } from "@/components/panel/panel-context";
 import { EmptyState, Notice, primaryClass } from "@/components/panel/panel-ui";
@@ -12,6 +12,7 @@ export function SyncSection() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [tone, setTone] = useState<"ok" | "error">("ok");
 
   function fail(caught: unknown) {
     if (isUnauthorized(caught)) {
@@ -21,14 +22,14 @@ export function SyncSection() {
     }
   }
 
+  const loadRuns = useCallback(async () => {
+    const data = await panelFetch<{ corridas: SyncRunItem[] }>("/api/panel/sincronizar");
+    setRuns(data.corridas);
+  }, []);
+
   useEffect(() => {
     let active = true;
-    panelFetch<{ corridas: SyncRunItem[] }>("/api/panel/sincronizar")
-      .then((data) => {
-        if (active) {
-          setRuns(data.corridas);
-        }
-      })
+    loadRuns()
       .catch((caught) => {
         if (!active) {
           return;
@@ -44,7 +45,7 @@ export function SyncSection() {
     return () => {
       active = false;
     };
-  }, [onUnauthorized]);
+  }, [loadRuns, onUnauthorized]);
 
   async function run() {
     setError(null);
@@ -52,7 +53,9 @@ export function SyncSection() {
     setPending(true);
     try {
       const result = await panelFetch<{ ok: boolean; mensaje: string }>("/api/panel/sincronizar", { method: "POST" });
+      setTone(result.ok ? "ok" : "error");
       setMessage(result.mensaje);
+      await loadRuns();
     } catch (caught) {
       fail(caught);
     } finally {
@@ -65,13 +68,13 @@ export function SyncSection() {
       <header>
         <h2 className="text-2xl font-semibold tracking-tight">Sincronización</h2>
         <p className="mt-1 text-sm text-zinc-600">
-          La corrida diaria la dispara Vercel. Este botón solo lo ve quien tiene permiso de ejecutarla.
+          Descarga clientes, pedidos y pagos, y recalcula los puntos al 30 de abril de 2026. La primera corrida puede tardar cerca de un minuto.
         </p>
       </header>
       {error ? <Notice tone="error">{error}</Notice> : null}
-      {message ? <Notice tone="ok">{message}</Notice> : null}
+      {message ? <Notice tone={tone}>{message}</Notice> : null}
       <button className={`${primaryClass} w-fit`} type="button" onClick={run} disabled={pending}>
-        {pending ? "Consultando…" : "Sincronizar ahora"}
+        {pending ? "Sincronizando…" : "Sincronizar ahora"}
       </button>
       {!runs && !error ? <p className="text-sm text-zinc-600">Cargando corridas…</p> : null}
       {runs && runs.length === 0 ? <EmptyState>Todavía no hay corridas registradas.</EmptyState> : null}

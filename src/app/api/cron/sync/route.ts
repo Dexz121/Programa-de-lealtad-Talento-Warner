@@ -1,4 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
+import { connection } from "next/server";
+import { SyncBusyError, runSync } from "@/lib/sync-run";
+
+export const maxDuration = 60;
 
 function bearerToken(request: Request) {
   const header = request.headers.get("authorization");
@@ -22,6 +26,7 @@ function secretsMatch(provided: string, expected: string) {
 }
 
 export async function GET(request: Request) {
+  await connection();
   const secret = process.env.CRON_SECRET;
   const token = bearerToken(request);
 
@@ -29,9 +34,15 @@ export async function GET(request: Request) {
     return Response.json({ error: "No autorizado" }, { status: 401 });
   }
 
-  return Response.json({
-    ok: true,
-    sincronizado: false,
-    mensaje: "La corrida aún no sincroniza datos.",
-  });
+  try {
+    const result = await runSync({ origen: "cron" });
+    return Response.json(result);
+  } catch (error) {
+    if (error instanceof SyncBusyError) {
+      return Response.json({ error: error.message }, { status: 409 });
+    }
+
+    console.error(error);
+    return Response.json({ error: "No se pudo sincronizar." }, { status: 500 });
+  }
 }

@@ -356,6 +356,7 @@ export async function applyRedemptionAction(id: string, accion: unknown) {
         tipo: "devolucion",
         referencia: `canje:${id}`,
         puntos,
+        source: "panel",
         createdAt: FieldValue.serverTimestamp(),
       });
     }

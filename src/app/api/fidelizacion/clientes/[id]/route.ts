@@ -1,4 +1,5 @@
-import { bearerToken, corsHeaders, options } from "@/lib/evaluation-api";
+import { fidelizacionCliente } from "@/lib/fidelizacion-read";
+import { authorizeEvaluation, corsHeaders, json, options } from "@/lib/evaluation-api";
 
 export function OPTIONS() {
   return options();
@@ -8,14 +9,16 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> },
 ) {
-  const { id } = await context.params;
-
-  if (!bearerToken(request)) {
-    return Response.json({ error: "No autorizado" }, { status: 401, headers: corsHeaders });
+  const denied = await authorizeEvaluation(request);
+  if (denied) {
+    return denied;
   }
 
-  return Response.json(
-    { error: "Contrato de fidelización aún no implementado", cliente_id: id },
-    { status: 501, headers: corsHeaders },
-  );
+  const { id } = await context.params;
+  const cliente = await fidelizacionCliente(id);
+  if (!cliente) {
+    return json({ error: "No encontrado" }, 404);
+  }
+
+  return Response.json(cliente, { headers: corsHeaders });
 }
