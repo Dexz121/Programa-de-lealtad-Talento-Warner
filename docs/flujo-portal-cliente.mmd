@@ -1,0 +1,67 @@
+%% Flujo del cliente después de que el equipo genera el acceso al portal.
+%% La contraseña temporal se muestra una sola vez en el panel.
+
+flowchart TD
+  acceso["El equipo genera o restablece el acceso"] --> temporal["Firebase queda con contraseña temporal y el cliente en acceso temporal"]
+  temporal --> login["Entra a /portal/login con su correo y esa contraseña"]
+  login --> credencial{"¿Correo y contraseña correctos?"}
+  credencial -->|No| rechaza["Muestra correo o contraseña incorrectos"]
+  rechaza --> login
+  credencial -->|Sí| sesion["Pide la sesión del portal"]
+  sesion --> portal{"¿La cuenta es de un cliente?"}
+  portal -->|No| cierra["Cierra la sesión de Firebase"]
+  cierra --> login
+  portal -->|Sí| clavePregunta{"¿Debe cambiar la contraseña?"}
+
+  clavePregunta -->|Sí| bloqueo["Solo puede usar /portal/clave"]
+  bloqueo --> nueva["Elige una contraseña de al menos 8 caracteres y la confirma"]
+  nueva --> coincide{"¿La confirmación coincide?"}
+  coincide -->|No| nueva
+  coincide -->|Sí| guarda["Guarda la contraseña y deja el acceso activo"]
+  guarda --> entra["Entra al portal"]
+
+  clavePregunta -->|No| entra
+  entra --> menu["Ve inicio, catálogo, mis canjes, movimientos y contraseña"]
+  entra --> salir["Cerrar sesión"]
+  salir --> login
+  menu --> seccion{"Elige una sección"}
+
+  seccion -->|Inicio| inicio
+  seccion -->|Catálogo| catalogo
+  seccion -->|Mis canjes| canjes
+  seccion -->|Movimientos| movimientos
+  seccion -->|Contraseña| clavePropia
+
+  subgraph inicioBox ["Inicio"]
+    inicio["Ve nivel, puntos, disponibles y los 3 movimientos más recientes"]
+    inicio --> verTodos["Puede abrir el historial completo"]
+  end
+
+  subgraph catalogoBox ["Catálogo"]
+    catalogo["Ve las recompensas activas: puntos, nivel, stock y, si es descuento, vigencia"]
+    catalogo --> puede{"¿Nivel, puntos y stock alcanzan?"}
+    puede -->|No| aviso["El botón explica por qué no puede canjear"]
+    puede -->|Sí| pedir["Pide el canje"]
+    pedir --> transaccion["Una transacción lee recompensa, puntos y tope por cliente"]
+    transaccion --> decision{"¿Sigue habiendo stock, puntos y cupo?"}
+    decision -->|No| rechazo["Rechaza el canje y no escribe nada"]
+    decision -->|Sí| juntos["Descuenta stock y puntos, escribe el movimiento de canje y, si es descuento, crea el cupón"]
+    juntos --> producto{"Tipo de recompensa"}
+    producto -->|Producto| pendiente["El canje queda pendiente de entrega"]
+    producto -->|Descuento| cupon["El canje queda vigente y muestra el código del cupón"]
+  end
+
+  subgraph canjesBox ["Mis canjes"]
+    canjes["Ve sus canjes, el estado y el cupón si existe"]
+  end
+
+  subgraph movimientosBox ["Movimientos"]
+    movimientos["Ve hasta 30 movimientos propios, los más recientes primero"]
+  end
+
+  subgraph claveBox ["Contraseña"]
+    clavePropia["Escribe la contraseña actual"]
+    clavePropia --> actual{"¿La contraseña actual es correcta?"}
+    actual -->|No| clavePropia
+    actual -->|Sí| reemplaza["Guarda la nueva contraseña"]
+  end

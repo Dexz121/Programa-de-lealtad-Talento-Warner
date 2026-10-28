@@ -1,32 +1,40 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import { useRouter } from "next/navigation";
+import { signInWithEmailAndPassword, signOut } from "firebase/auth";
+import type { PortalSession } from "@/domain/panel";
+import { getFirebaseAuth } from "@/lib/firebase";
 import { Notice } from "@/components/panel/panel-ui";
+import { PanelError, portalAuthMessage, portalErrorMessage, portalFetch } from "@/components/portal/use-portal-api";
 
 export function PortalLoginForm() {
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
 
-  function onSubmit(event: FormEvent<HTMLFormElement>) {
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    // El inicio de sesión del cliente se conecta en el siguiente paso. No llama a Firebase.
-    setMessage(null);
-    const trimmed = email.trim();
-
-    if (!trimmed.includes("@") || !trimmed.includes(".")) {
-      setError("Escribe un correo válido.");
-      return;
-    }
-
-    if (password.length < 8) {
-      setError("La contraseña debe tener al menos 8 caracteres.");
-      return;
-    }
-
     setError(null);
-    setMessage("La sesión del cliente se conecta en el siguiente paso.");
+    setPending(true);
+
+    try {
+      await signInWithEmailAndPassword(getFirebaseAuth(), email.trim(), password);
+      const session = await portalFetch<PortalSession>("/api/portal/session");
+      router.push(session.mustChangePassword ? "/portal/clave" : "/portal");
+    } catch (caught) {
+      await signOut(getFirebaseAuth()).catch(() => undefined);
+      if (caught instanceof PanelError) {
+        setError(portalErrorMessage(caught));
+        return;
+      }
+
+      setError(portalAuthMessage(caught));
+    } finally {
+      setPending(false);
+    }
   }
 
   return (
@@ -57,12 +65,12 @@ export function PortalLoginForm() {
         />
       </label>
       {error ? <Notice tone="error">{error}</Notice> : null}
-      {message ? <Notice tone="ok">{message}</Notice> : null}
       <button
         className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
         type="submit"
+        disabled={pending}
       >
-        Entrar
+        {pending ? "Entrando…" : "Entrar"}
       </button>
     </form>
   );

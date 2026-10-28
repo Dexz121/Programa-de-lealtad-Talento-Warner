@@ -5,6 +5,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { put } from "@vercel/blob";
 import { mexicoDate } from "@/domain/cutoff";
 import type { RedemptionItem, RewardItem, RoleItem, StaffItem, TokenItem } from "@/domain/panel";
+import { rewardClaimId } from "@/domain/redemption";
 import { isLevel } from "@/domain/panel";
 import { INITIAL_ROLES, type PermissionId } from "@/domain/permissions";
 import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
@@ -195,6 +196,7 @@ export async function createReward(input: unknown) {
     fotoUrl: null,
     createdAt: FieldValue.serverTimestamp(),
   });
+  invalidateReads("portal:catalogo");
   return rewardFromDoc(ref.id, { ...draft, fotoUrl: null });
 }
 
@@ -207,6 +209,7 @@ export async function updateReward(id: string, input: unknown) {
 
   const draft = parseReward(input);
   await ref.set(rewardPayload(draft), { merge: true });
+  invalidateReads("portal:catalogo");
   return rewardFromDoc(id, { ...asRecord(current.data()), ...draft });
 }
 
@@ -240,6 +243,7 @@ export async function uploadRewardPhoto(id: string, file: File) {
     contentType: file.type,
   });
   await ref.set({ fotoUrl: blob.url, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+  invalidateReads("portal:catalogo");
   return { fotoUrl: blob.url };
 }
 
@@ -308,6 +312,7 @@ export async function applyRedemptionAction(id: string, accion: unknown) {
 
   const db = getAdminDb();
   const redemptionRef = db.collection("redemptions").doc(id);
+  let affectedCustomerId = "";
 
   await db.runTransaction(async (transaction) => {
     const redemptionSnap = await transaction.get(redemptionRef);
@@ -324,9 +329,15 @@ export async function applyRedemptionAction(id: string, accion: unknown) {
     const rewardRef = rewardId ? db.collection("rewards").doc(rewardId) : null;
     const snapshotRef = customerId ? db.collection("loyaltySnapshots").doc(customerId) : null;
     const couponRef = couponId ? db.collection("coupons").doc(couponId) : null;
+    const claimRef =
+      accion === "cancelar" && customerId && rewardId
+        ? db.collection("rewardClaims").doc(rewardClaimId(customerId, rewardId))
+        : null;
     const rewardSnap = rewardRef ? await transaction.get(rewardRef) : null;
     const snapshotSnap = snapshotRef ? await transaction.get(snapshotRef) : null;
     const couponSnap = couponRef ? await transaction.get(couponRef) : null;
+    const claimSnap = claimRef ? await transaction.get(claimRef) : null;
+    affectedCustomerId = customerId;
 
     if (accion === "entregar") {
       if (rewardTipo !== "producto" || estado !== "pendiente") {
@@ -360,6 +371,13 @@ export async function applyRedemptionAction(id: string, accion: unknown) {
       }
     }
 
+    if (claimSnap?.exists && claimRef) {
+      const count = asInteger(asRecord(claimSnap.data()).count) ?? 0;
+      if (count > 0) {
+        transaction.update(claimRef, { count: count - 1 });
+      }
+    }
+
     const puntos = asInteger(redemption.puntos) ?? 0;
     if (snapshotSnap?.exists && snapshotRef) {
       const available = asInteger(asRecord(snapshotSnap.data()).puntosDisponibles) ?? 0;
@@ -385,6 +403,14 @@ export async function applyRedemptionAction(id: string, accion: unknown) {
   });
 
   invalidateReads("loyalty:");
+  if (affectedCustomerId) {
+    invalidateReads(`portal:canjes:${affectedCustomerId}:`);
+  }
+  if (accion === "cancelar" && affectedCustomerId) {
+    invalidateReads(`portal:mov:${affectedCustomerId}:`);
+    invalidateReads("portal:catalogo");
+    invalidateReads("portal:session:");
+  }
 }
 
 function temporaryPassword() {
@@ -447,6 +473,12 @@ export async function grantPortalAccess(customerId: string) {
     uid = created.uid;
   }
 
+  const userRecord = await auth.getUser(uid);
+  await auth.setCustomUserClaims(uid, {
+    ...(userRecord.customClaims ?? {}),
+    customerId: snap.id,
+  });
+
   await snap.ref.set(
     {
       authUid: uid,
@@ -456,6 +488,7 @@ export async function grantPortalAccess(customerId: string) {
     { merge: true },
   );
   invalidateReads("loyalty:");
+  invalidateReads(`portal:session:${uid}:`);
 
   return { password, portal: "temporal" as const };
 }

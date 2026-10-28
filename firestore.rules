@@ -6,6 +6,9 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // El portal no lee estas colecciones desde el navegador: lo hace el Admin SDK.
+    // Las reglas no usan get() porque cada get se cobra como una lectura más.
+
     match /staffUsers/{uid} {
       allow read: if signedIn() && request.auth.uid == uid;
       allow write: if false;
@@ -52,7 +55,15 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /rewardClaims/{claimId} {
+      allow read, write: if false;
+    }
+
     match /syncRuns/{runId} {
+      allow read, write: if false;
+    }
+
+    match /syncLock/{lockId} {
       allow read, write: if false;
     }
   }

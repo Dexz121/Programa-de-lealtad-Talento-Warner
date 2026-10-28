@@ -115,6 +115,18 @@ export type SyncRunItem = {
   resultado: string;
 };
 
+export type PortalSession = {
+  uid: string;
+  customerId: string;
+  nombre: string;
+  email: string;
+  portal: PortalStatus;
+  mustChangePassword: boolean;
+  nivel: Level | null;
+  puntos: number | null;
+  puntosDisponibles: number | null;
+};
+
 export function isLevel(value: string): value is Level {
   return (LEVELS as readonly string[]).includes(value);
 }

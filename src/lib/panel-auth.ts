@@ -5,9 +5,11 @@ import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
 import { INITIAL_ROLES, PERMISSIONS, type PermissionId } from "@/domain/permissions";
 import type { PanelSession } from "@/domain/panel";
 import { asRecord, asText } from "@/lib/panel-values";
+import { loadPortalAccount } from "@/lib/portal-session";
 import { cachedRead } from "@/lib/read-cache";
 
 const STAFF_TTL_MS = 45_000;
+const PORTAL_TTL_MS = 45_000;
 
 const PERMISSION_IDS = new Set<string>(PERMISSIONS.map((permission) => permission.id));
 
@@ -171,4 +173,38 @@ async function loadStaffMember(uid: string, tokenEmail: string) {
   };
 
   return { kind: "ok" as const, staff };
+}
+
+export async function requirePortal(request: Request, options?: { allowTemporary?: boolean }) {
+  await connection();
+
+  const token = bearerToken(request);
+  if (!token) {
+    return { response: Response.json({ error: "No autorizado" }, { status: 401 }) };
+  }
+
+  let uid = "";
+  let claimCustomerId = "";
+
+  try {
+    const decoded = await getAdminAuth().verifyIdToken(token);
+    uid = decoded.uid;
+    if (typeof decoded.customerId === "string") {
+      claimCustomerId = decoded.customerId;
+    }
+  } catch {
+    return { response: Response.json({ error: "No autorizado" }, { status: 401 }) };
+  }
+
+  const loaded = await cachedRead(`portal:session:${uid}:`, PORTAL_TTL_MS, () => loadPortalAccount(uid, claimCustomerId));
+
+  if (loaded.kind === "missing") {
+    return { response: Response.json({ error: "Esta cuenta no es del portal." }, { status: 403 }) };
+  }
+
+  if (loaded.session.mustChangePassword && !options?.allowTemporary) {
+    return { response: Response.json({ error: "Primero elige tu contraseña." }, { status: 409 }) };
+  }
+
+  return { portal: loaded.session };
 }
